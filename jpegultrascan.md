@@ -11,6 +11,8 @@ JPEG lossless recompressor that tries all scan possibilities to minimize size
     -i -1   Disallow single scan DC components, which may be incompatible with some software
     -j      Strip APP0 segment for 18-byte savings (generates non-compliant JPEG that may be incompatible with some
             software)
+    -j 0-14 Strip APPn segment; specify multiple times to strip different segments (generates JPEG that may be
+            incompatible with some software)
     -a      Use arithmetic coding (unsupported by most software; jpegtran support required)
     -b 0-13 Maximum number of bit splits to test (default: 3)
     -t [N]  Number of simultaneous processes (default: 8 if specified, 1 otherwise)

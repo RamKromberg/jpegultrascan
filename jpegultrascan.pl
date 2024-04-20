@@ -4,9 +4,9 @@ jpegultrascan
 =head1 DESCRIPTION
 JPEG lossless recompressor that tries all scan possibilities to minimize size
 =head1 VERSION
-1.3.4 2021-03-24
+1.4.0 2024-04-19
 =head1 LICENSE
-Copyright 2015-2021 Aaron Kaluszka
+Copyright 2015-2024 Aaron Kaluszka
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,12 +32,11 @@ my $maxbits = 3;
 my $threads = 1;
 my $jpegtran = my $jpegtran2 = 'jpegtran';
 my $home = glob '~';
-GetOptions 'q' => \my $quiet, 'v' => \my $verbose, 'i:i' => \my $incompat, 'j' => \my $app0, 's' => \my $strip, 'a' => \my $arith,
+GetOptions 'q' => \my $quiet, 'v' => \my $verbose, 'i:i' => \my $incompat, 'j:i' => \my @app, 's' => \my $strip, 'a' => \my $arith,
            'p=s' => \$jpegtran, 'o=s' => \$jpegtran2, 'b=i' => \$maxbits, 't:i' => \$threads, 'h|?' => \my $help;
-my @strip = ('-copy', defined $strip ? $strip eq 'some' ? 'comments' : 'none' : 'all');
+my @strip = my @strip2 = ('-copy', defined $strip ? $strip eq 'some' ? 'comments' : 'none' : 'all');
 $arith = defined $arith ? '-arithmetic' : '';
 $verbose = defined $verbose;
-$app0 = defined $app0;
 $incompat = defined $incompat ? $incompat == 0 ? 1 : $incompat : 0;
 $threads = 8 if $threads < 1;
 $maxbits = 13 if $maxbits > 13;
@@ -59,6 +58,8 @@ Switches:
           some software
   -j      Strip APP0 segment for 18-byte savings (generates non-compliant JPEG
           that may be incompatible with some software)
+  -j 0-14 Strip APPn segment; specify multiple times to strip different segments
+          (generates JPEG that may be incompatible with some software)
   -a      Use arithmetic coding (unsupported by most software; jpegtran support
           required)
   -b 0-13 Maximum number of bit splits to test (default: 3)
@@ -115,12 +116,16 @@ sub scansizes($) {
   my ($file) = @_;
   my @sizes;
   my $scanstart = 0;
+  my $nextoff = 0;
   while ($file =~ /\xFF+(.)/gs) {
+    next if $+[0] < $nextoff + 2;
     my $type = ord $1;
     next unless $type;
-    my $len = ($type == 217 ? 0 : unpack 'n', substr $file, $+[0], 2) + 2;
+    my $tagstart = $-[0] < $nextoff ? $nextoff : $-[0];
+    my $len = ($type == 216 || $type == 217 ? 0 : unpack 'n', substr $file, $+[0], 2) + $+[0] - $tagstart;
+    $nextoff = $tagstart + $len;
     if ($scanstart) {
-      $sizes[$#sizes] += $-[0] - $scanstart;
+      $sizes[$#sizes] += $tagstart - $scanstart;
       last if $type == 217;
       push @sizes, $len;
       $scanstart = 0;
@@ -129,7 +134,7 @@ sub scansizes($) {
     } elsif (@sizes) {
       $sizes[$#sizes] += $len;
     }
-    $scanstart = $-[0] + $len if $type == 218;
+    $scanstart = $tagstart + $len if $type == 218;
   }
   @sizes;
 }
@@ -332,12 +337,13 @@ sub trysplits($$$) {
   @{$optimal{$key}};
 }
 
-sub app0remove($) {
-  my ($file) = @_;
-  while ("\xFF\xE0" eq substr $file, 2, 2) {
+sub appremove($$) {
+  my ($file, $n) = @_;
+  my $tag = pack 'CC', 255, 224 + $n;
+  while ($tag eq substr $file, 2, 2) {
     my $size = 2 + unpack 'n', substr $file, 4, 2;
     substr $file, 2, $size, '';
-    print $verbose ? "\nRemoved $size APP0 bytes.\n" : '.';
+    print $verbose ? "\nRemoved $size APP$n bytes.\n" : '.';
   }
   $file;
 }
@@ -380,16 +386,21 @@ sub partitionscans($@) {
   }
 }
 
-my $data = `"$jpegtran" -? 2>&1`;
+my $data = read_file $fin;
+$maxbits = 10 if $maxbits > 10 && $data =~ /\xFF[\xC0-\xC3\xC5-\xC7\xC9-\xCB\xCD-\xCF]..(.)/s && ord $1 == 8;
+my $hasicc = $data =~ /\xFF\xE2(..)ICC_PROFILE/s && substr($data, $+[0], unpack 'n', $1) !~ /desc.+sRGB/s;
+$data = `"$jpegtran" -? 2>&1`;
 $tran = $data =~ /outputfile/ ? \&wintran : \&tran;
+$strip[1] = $data =~ /copy icc/ ? 'icc' : 'all' if $hasicc && $strip[1] ne 'all';
 $data = `"$jpegtran2" -? 2>&1`;
+$strip2[1] = $data =~ /copy icc/ ? 'icc' : 'all' if $hasicc && $strip2[1] ne 'all';
 if ($data =~ /outputfile/) {
-  $data = `"$jpegtran2" -v @strip -optimize "$fin" "$jtmp" 2>&1`;
+  $data = `"$jpegtran2" -v @strip2 -optimize "$fin" "$jtmp" 2>&1`;
   $tran2 = \&wintran;
 } else {
   open my $OLDERR, '>&', STDERR;
   open STDERR, '>', $ftmp;
-  open my $TRAN, '-|', $jpegtran2, '-v', @strip, '-optimize', $fin;
+  open my $TRAN, '-|', $jpegtran2, '-v', @strip2, '-optimize', $fin;
   $data = <$TRAN>;
   close $TRAN;
   open STDERR, '>&', $OLDERR;
@@ -401,10 +412,6 @@ $data =~ /components=(\d+)/ or die "Couldn't read file";
 $planes = $1 - 1;
 $width = ($planes + 1) * 2 + 10;
 $width2 = length $insize;
-if ($maxbits > 10) {
-  $data = read_file $fin;
-  $maxbits = 10 if $data =~ /\xFF[\xC0-\xC3\xC5-\xC7\xC9-\xCB\xCD-\xCF]..(.)/s && ord $1 == 8;
-}
 
 for (0 .. $planes) {
   print "Calculating sizes of AC scans, plane $_\n";
@@ -467,12 +474,12 @@ $best = join "\n", (split "\n", $best)[@bestout];
 
 write_file $ftmp, $best;
 $data = &$tran('-scans', "\"$ftmp\"", $arith, @strip, "\"$jtmp\"");
-$data = app0remove $data if $app0;
+$data = appremove($data, $_) for @app;
 
 if ($jpegtran ne $jpegtran2) {
   $jpegtran = $jpegtran2;
-  my $data2 = &$tran2('-scans', "\"$ftmp\"", $arith, @strip, "\"$jtmp\"");
-  $data2 = app0remove $data2 if $app0;
+  my $data2 = &$tran2('-scans', "\"$ftmp\"", $arith, @strip2, "\"$jtmp\"");
+  $data2 = appremove($data2, $_) for @app;
   $data = $data2 if length $data2 && length $data2 < length $data;
 }
 
