@@ -27,6 +27,7 @@ use open ':std', IO => ':raw';
 use File::Spec;
 use File::Temp 'tempfile';
 use Getopt::Long qw(:config bundling);
+use constant MAXCOEF => 63;
 
 my $maxbits = 3;
 my $threads = 1;
@@ -50,25 +51,25 @@ open my $STDOUT, '>&STDOUT';
 @ARGV == 2 && !defined $help or die 'usage: jpegultrascan.pl [switches] inputfile outputfile
 JPEG lossless recompressor that tries all scan possibilities to minimize size
 Switches:
-  -s      Strip all extra markers
-  -s some Strip only non-comment markers
-  -i      Allow multiple planes per DC scan, which may be incompatible with some
-          software
-  -i -1   Disallow single scan DC components, which may be incompatible with
-          some software
-  -j      Strip APP0 segment for 18-byte savings (generates non-compliant JPEG
-          that may be incompatible with some software)
-  -j 0-14 Strip APPn segment; specify multiple times to strip different segments
-          (generates JPEG that may be incompatible with some software)
-  -a      Use arithmetic coding (unsupported by most software; jpegtran support
-          required)
-  -b 0-13 Maximum number of bit splits to test (default: 3)
-  -t [N]  Number of simultaneous processes (default: 8 if specified,
-          1 otherwise)
-  -q      Suppress all output
-  -v      Verbose output
-  -p path Path to jpegtran (default: jpegtran)
-  -o path Path to other jpegtran (default: jpegtran)
+  -s       Strip all extra markers
+  -s some  Strip only non-comment markers
+  -i       Allow multiple planes per DC scan, which may be incompatible with
+           some software
+  -i -1    Disallow single scan DC components, which may be incompatible with
+           some software
+  -j       Strip APP0 segment for 18-byte savings (generates non-compliant JPEG
+           that may be incompatible with some software)
+  -j 0-14  Strip APPn segment; specify multiple times to strip different
+           segments (generates JPEG that may be incompatible with some software)
+  -a       Use arithmetic coding (unsupported by most software; jpegtran support
+           required)
+  -b 0-13  Maximum number of bit splits to test (default: 3)
+  -t [N]   Number of simultaneous processes (default: 8 if specified,
+           1 otherwise)
+  -q       Suppress all output
+  -v       Verbose output
+  -p path  Path to jpegtran (default: jpegtran)
+  -o path  Path to other jpegtran (default: jpegtran)
 ';
 
 my ($fin, $fout) = @ARGV;
@@ -101,12 +102,12 @@ sub write_file($@) {
 }
 
 sub tran(@) {
-  `"$jpegtran" -optimize @_`;
+  `"$jpegtran" -optimize @_` or die;
 }
 
 sub wintran(@) {
   my (undef, $tmp) = tempfile SUFFIX => $$;
-  system qq{"$jpegtran" -optimize @_ "$tmp"};
+  system qq{"$jpegtran" -optimize @_ "$tmp"} or die;
   my $data = read_file $tmp;
   unlink $tmp;
   $data;
@@ -129,7 +130,7 @@ sub scansizes($) {
       last if $type == 217;
       push @sizes, $len;
       $scanstart = 0;
-    } elsif (!@sizes && $type >= 192 && $type <= 207 && $type != 196 && $type != 200 && $type != 204) {
+    } elsif (!@sizes && 192 <= $type <= 207 && $type != 196 && $type != 200 && $type != 204) {
       push @sizes, 0;
     } elsif (@sizes) {
       $sizes[$#sizes] += $len;
@@ -158,7 +159,7 @@ sub transcan($$) {
     if ($verbose) {
       for (0 .. $#sizesi) {
         my $scan = @{$scans[$i]}[$_];
-        if (!defined $sizes{$scan}) {
+        unless (defined $sizes{$scan}) {
           $sizes{$scan} = $sizesi[$_];
           chop $scan;
           printf $STDOUT "%-${width}s %${width2}d\n", $scan, $sizesi[$_];
@@ -215,7 +216,7 @@ sub doscans() {
       }
     }
   }
-  @scans = ();
+  @scans = ()
 }
 
 sub queuescans(@) {
@@ -263,7 +264,7 @@ sub generatedcscans($) {
   }
   for (0 .. $maxbits) {
     my @scans = generatebitscans $plane, 0, 0, $_;
-    push @scans, $dummy if defined $dummy;
+    push @scans, $dummy if $dummy;
     queuescans @scans;
   }
 }
@@ -271,16 +272,16 @@ sub generatedcscans($) {
 sub generateacscans($) {
   my ($plane) = @_;
   my $dummy = join(' ', 0 .. $planes) . ": 0 0 0 9;\n";
-  for (my $numcoeffs = 0; $numcoeffs < 63; ++$numcoeffs) {
-    for (my $offset = 0; $offset < $numcoeffs + 1 && $offset < 63 - $numcoeffs; ++$offset) {
+  for (0 .. MAXCOEF - 1) {
+    for my $offset (0 .. ($_ < MAXCOEF - 1 - $_ ? $_ : MAXCOEF - 1 - $_)) {
       for (my $numbits = 0; $numbits <= $maxbits; ++$numbits) {
         my @scans = $dummy;
         push @scans, generatebitscans $plane, 1, $offset, $numbits if $offset > 0;
         my $i = $offset + 1;
-        for (; $i + $numcoeffs < 63; $i += $numcoeffs + 1) {
-          push @scans, generatebitscans $plane, $i, $i + $numcoeffs, $numbits;
+        for (; $i + $_ < MAXCOEF; $i += $_ + 1) {
+          push @scans, generatebitscans $plane, $i, $i + $_, $numbits;
         }
-        push @scans, generatebitscans $plane, $i, 63, $numbits if $i <= 63;
+        push @scans, generatebitscans $plane, $i, MAXCOEF, $numbits if $i <= MAXCOEF;
         @scans <= $maxperfile ? queuescans @scans : queuescansmulti @scans;
       }
     }
@@ -299,7 +300,7 @@ sub trybitsplits($$$$$);
 sub trybitsplits($$$$$) {
   my ($plane, $a, $b, $c, $d) = @_;
   my $key = "$plane $a $b $c $d";
-  unless (defined $optimal2{$key}) {
+  unless ($optimal2{$key}) {
     my $minscans = "$plane: $a $b $c $d;\n";
     my $minsize = $sizes{$minscans};
     for ($a .. $b - 1) {
@@ -316,7 +317,7 @@ sub trysplits($$$);
 sub trysplits($$$) {
   my ($plane, $a, $b) = @_;
   my $key = "$plane $a $b";
-  unless (defined $optimal{$key}) {
+  unless ($optimal{$key}) {
     my ($minsize, $minscans) = (~0, '');
     for (0 .. $maxbits) {
       my ($allsize, $allscans) = trybitsplits $plane, $a, $b, 0, $_;
@@ -353,7 +354,7 @@ sub partitionscans($@) {
   my $offset = shift;
   my ($dcallsize, $dcallscans) = (0, '');
   for (@_) {
-    if (!defined $dcsize{$_}) {
+    unless (defined $dcsize{$_}) {
       generatedcscans $_;
       doscans;
       ($dcsize{$_}, $dcscans{$_}) = trysplits $_, 0, 0;
@@ -364,7 +365,7 @@ sub partitionscans($@) {
   ($bestsize, $best) = choosebest $dcallsize + $acallsize, $dcallscans . $acallscans, $bestsize, $best;
   my @all = map "$_;\n", @_;
   for (@all) {
-    if (!defined $sizes{$_}) {
+    unless (defined $sizes{$_}) {
       queuescans @all;
       doscans;
       last;
@@ -372,7 +373,7 @@ sub partitionscans($@) {
   }
   my $allsize = 0;
   for (@all) {
-    $allsize += $sizes{$_} if defined $sizes{$_};
+    $allsize += $sizes{$_} if $sizes{$_};
   }
   ($bestsize, $best) = choosebest $allsize, join('', @all), $bestsize, $best;
   for my $i ($offset .. $#_) {
@@ -387,7 +388,7 @@ sub partitionscans($@) {
 }
 
 my $data = read_file $fin;
-$maxbits = 10 if $maxbits > 10 && $data =~ /\xFF[\xC0-\xC3\xC5-\xC7\xC9-\xCB\xCD-\xCF]..(.)/s && ord $1 == 8;
+$maxbits = 10 if $maxbits > 10 && $data =~ /\xFF[\xC0-\xC3\xC5-\xC7\xC9-\xCB\xCD-\xCF]..\x08/s;
 my $hasicc = $data =~ /\xFF\xE2(..)ICC_PROFILE/s && substr($data, $+[0], unpack 'n', $1) !~ /desc.+sRGB/s;
 $data = `"$jpegtran" -? 2>&1`;
 $tran = $data =~ /outputfile/ ? \&wintran : \&tran;
@@ -418,7 +419,7 @@ for (0 .. $planes) {
   generateacscans $_;
   doscans;
   print "\nSearching for best AC scan, plane $_\n";
-  ($acsize[$_], $acscans[$_]) = trysplits $_, 1, 63;
+  ($acsize[$_], $acscans[$_]) = trysplits $_, 1, MAXCOEF;
   $acallsize += $acsize[$_];
   $acallscans .= $acscans[$_];
   print "Best AC scan, plane $_:\n$acscans[$_]Size: $acsize[$_]\n\n" if $verbose;
@@ -441,7 +442,7 @@ $best = join "\n", sort {
   my $pattern = qr/^([^:]*)(?:: (\d+) (\d+) \d+ (\d+))?/;
   my ($ap, $aa, $ab, $ad) = $a =~ /$pattern/g;
   my ($bp, $ba, $bb, $bd) = $b =~ /$pattern/g;
-  !defined $ab || !defined $bb ? $ap cmp $bp : $ab <=> $bb || $ap cmp $bp;
+  !defined $ab || !defined $bb ? $ap cmp $bp : $ab <=> $bb || $ap cmp $bp
 } split "\n", $best;
 
 my @best = map {[/^([^:]*)(?:: (\d+) (\d+) \d+ (\d+))?/g]} split "\n", $best;
@@ -451,7 +452,7 @@ for my $i (0 .. $#best) {
   for my $j (0 .. $#best) {
     next if $i == $j;
     push @{$prev[$j]}, $i if (
-      ($best[$j][0] eq $best[$i][0] && ($best[$j][1] >= $best[$i][1] && $best[$j][1] <= $best[$i][2] || $best[$i][1] >= $best[$j][1] && $best[$i][1] <= $best[$j][2]) && $best[$i][3] > $best[$j][3])
+      ($best[$j][0] eq $best[$i][0] && ($best[$i][1] <= $best[$j][1] <= $best[$i][2] || $best[$j][1] <= $best[$i][1] <= $best[$j][2]) && $best[$i][3] > $best[$j][3])
       || ($best[$j][0] gt $best[$i][0] && $best[$j][2] >= $best[$i][2])
     );
   }
@@ -463,8 +464,8 @@ my %bestout = ();
 loop: while(@bestout < @best) {
   $i = 0 if ++$i == @best;
   next if defined $bestout{$i};
-  for my $j (@{$prev[$i]}) {
-    next loop if !defined $bestout{$j};
+  for (@{$prev[$i]}) {
+    next loop unless defined $bestout{$_};
   }
   push @bestout, $i;
   $bestout{$i} = 1;
@@ -474,12 +475,12 @@ $best = join "\n", (split "\n", $best)[@bestout];
 
 write_file $ftmp, $best;
 $data = &$tran('-scans', "\"$ftmp\"", $arith, @strip, "\"$jtmp\"");
-$data = appremove($data, $_) for @app;
+$data = appremove $data, $_ for @app;
 
 if ($jpegtran ne $jpegtran2) {
   $jpegtran = $jpegtran2;
   my $data2 = &$tran2('-scans', "\"$ftmp\"", $arith, @strip2, "\"$jtmp\"");
-  $data2 = appremove($data2, $_) for @app;
+  $data2 = appremove $data2, $_ for @app;
   $data = $data2 if length $data2 && length $data2 < length $data;
 }
 
