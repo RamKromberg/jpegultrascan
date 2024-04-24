@@ -4,7 +4,7 @@ jpegdropscan
 =head1 DESCRIPTION
 JPEG lossy recompressor that removes least informative scans to reach a target quality
 =head1 VERSION
-1.1.0 2024-04-22
+1.1.1 2024-04-24
 =head1 LICENSE
 Copyright 2015 - 2024 Aaron Kaluszka
 
@@ -29,17 +29,17 @@ use File::Temp 'tempfile';
 use Getopt::Long qw(:config bundling);
 
 my $jpegtran = 'jpegtran';
-my $butteraugli = 'butteraugli';
+my $metric = 'butteraugli';
 my $home = glob '~';
 my $maxbits = 3;
 GetOptions 'q' => \my $quiet, 'v' => \my $verbose, 'd=f' => \my $quality, 'b=i' => \$maxbits, 'n:i' => \my $norm,
-           'p=s' => \$jpegtran, 'c=s' => \$butteraugli, 'r=s' => \my $reference, 'h|?' => \my $help;
+           'p=s' => \$jpegtran, 'c=s' => \$metric, 'r=s' => \my $reference, 'h|?' => \my $help;
 $verbose = defined $verbose;
 $jpegtran =~s /^~/$home/;
-$butteraugli =~s /^~/$home/;
+$metric =~s /^~/$home/;
 $maxbits = 13 if $maxbits > 13;
 $maxbits = 0 if $maxbits < 0;
-$norm = 100 if $norm == 0;
+$norm = 100 if defined $norm && $norm == 0;
 
 open STDOUT, '>', File::Spec->devnull if defined $quiet;
 
@@ -100,8 +100,8 @@ sub wintran(@) {
   read_file $tmp;
 }
 
-sub butteraugli($) {
-  my $score = `"$butteraugli" "$reference" "$_[0]"` or die;
+sub metric($) {
+  my $score = `"$metric" "$reference" "$_[0]"` or die;
   chop $score;
   $score;
 }
@@ -160,7 +160,7 @@ sub checkbest(@) {
   my (undef, $tmp) = tempfile SUFFIX => $$;
   my $result = tryscans $fin, $scans;
   write_file $tmp, $result;
-  my $score = butteraugli $tmp;
+  my $score = metric $tmp;
   print $verbose ? "$score: " . length($result) . "\n" : '.';
   if (&$compare($score, $quality)) {
     return -1;
@@ -280,7 +280,7 @@ for (my $i = 0; $i < @scans; ++$i) {
     splice @scans, $i++, 0, [$_, 1, $s[2], $s[3], $s[4]] for split ' ', $s[0];
   }
 }
-my $origscore = butteraugli $fin;
+my $origscore = metric $fin;
 my $insize = -s $fin;
 print printscans(@scans), "$origscore: $insize\n" if $verbose;
 $compare = $norm ? sub {$_[0] < $_[1]} : sub {$_[0] > $_[1]};
