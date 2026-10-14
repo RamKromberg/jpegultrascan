@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 =head1 NAME
 jpegultrascan
@@ -35,17 +35,18 @@ my $threads  = 1;
 my $jpegtran = my $jpegtran2 = 'jpegtran';
 my $home     = glob '~';
 GetOptions
-  'q'   => \my $quiet,
-  'v'   => \my $verbose,
-  'i:i' => \my $incompat,
-  'j:i' => \my @app,
-  's'   => \my $strip,
-  'a'   => \my $arith,
-  'p=s' => \$jpegtran,
-  'o=s' => \$jpegtran2,
-  'b=i' => \$maxbits,
-  't:i' => \$threads,
-  'h|?' => \my $help;
+  'q'     => \my $quiet,
+  'v'     => \my $verbose,
+  'trace' => \my $trace,
+  'i:i'   => \my $incompat,
+  'j:i'   => \my @app,
+  's'     => \my $strip,
+  'a'     => \my $arith,
+  'p=s'   => \$jpegtran,
+  'o=s'   => \$jpegtran2,
+  'b=i'   => \$maxbits,
+  't:i'   => \$threads,
+  'h|?'   => \my $help;
 my @strip = my @strip2 =
   ( '-copy', defined $strip ? $strip eq 'some' ? 'comments' : 'none' : 'all' );
 $arith    = defined $arith ? '-arithmetic' : '';
@@ -80,6 +81,7 @@ Switches:
            1 otherwise)
   -q       Suppress all output
   -v       Verbose output
+  --trace  Output structural telemetry diagnostics and pipeline tracking keys
   -p path  Path to jpegtran (default: jpegtran)
   -o path  Path to other jpegtran (default: jpegtran)
 ';
@@ -444,6 +446,22 @@ $planes = $1 - 1;
 $width  = ( $planes + 1 ) * 2 + 10;
 $width2 = length $insize;
 
+if ($trace) {
+    print "[TRACE_MATRIX_DUMP_START]\n";
+    print "=== PERL REFERENCE COST HASH PROFILE DUMP ===\n";
+    for my $key ( sort keys %sizes ) {
+        if ( $key =~ /^(\d+):\s*(\d+)\s+(\d+)\s+0\s+(\d+)/ ) {
+            my ( $p, $ss, $se, $al ) = ( $1, $2, $3, $4 );
+            my $span = $se - $ss + 1;
+            print "MATRIX_CELL | P:$p | Ss:", sprintf( "%02d", $ss ), " | Se:",
+              sprintf( "%02d", $se ), " | Span:$span | Al:", sprintf( "%02d", $al ),
+              " | Cost:$sizes{$key}\n";
+        }
+    }
+    print "=============================================\n";
+    print "[TRACE_MATRIX_DUMP_END]\n";
+}
+
 for ( 0 .. $planes ) {
     print "Calculating sizes of AC scans, plane $_\n";
     generateacscans $_;
@@ -453,6 +471,20 @@ for ( 0 .. $planes ) {
     $acallsize += $acsize[$_];
     $acallscans .= $acscans[$_];
     print "Best AC scan, plane $_:\n$acscans[$_]Size: $acsize[$_]\n\n" if $verbose;
+}
+
+if ($trace) {
+    print "=== PERL REFERENCE COST HASH PROFILE DUMP ===\n";
+    for my $key ( sort keys %sizes ) {
+        if ( $key =~ /^(\d+):\s*(\d+)\s+(\d+)\s+0\s+(\d+);/ ) {
+            my ( $p, $ss, $se, $al ) = ( $1, $2, $3, $4 );
+            my $span = $se - $ss + 1;
+            print "MATRIX_CELL | P:$p | Ss:", sprintf( "%02d", $ss ), " | Se:",
+              sprintf( "%02d", $se ), " | Span:$span | Al:", sprintf( "%02d", $al ),
+              " | Cost:$sizes{$key}\n";
+        }
+    }
+    print "=============================================\n";
 }
 
 print "Calculating sizes and searching for best DC scan\n";
@@ -511,6 +543,36 @@ loop: while ( @bestout < @best ) {
 }
 $best = join "\n", ( split "\n", $best )[@bestout];
 
+# --- UNIFIED TELEMETRY PASS: FIXED POINTER INTERPOLATION AND TRAILING WHITESPACE ---
+if ($trace) {
+    print "[TRACE_FINAL_SCRIPT_START]\n";
+    print "=== FINAL PERL JPEGULTRASCAN SCRIPT DUMP ===\n";
+
+    my @lines = split "\n", $best;
+    for my $idx ( 0 .. $#lines ) {
+        my $line = $lines[$idx];
+
+        if ( $line =~ /^([^:]+):\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+);/ ) {
+            print "SCAN $idx: Comps=1, Component_Idx_0=$1, Ss=$2, Se=$3, Ah=$4, Al=$5\n";
+        } elsif ( $line =~ /^([^:]+):\s*0\s+0\s+0\s+9;/ || $line =~ /^([^:]+):\s*0\s*0\s*0\s*9;/ ) {
+            print "SCAN $idx: Comps=1, Component_Idx_0=$1, Ss=0, Se=0, Ah=0, Al=9\n";
+        } else {
+            my ( $comps_str, $params ) = split ':', $line;
+            my @c_list = split ' ', $comps_str;
+            my $num_c  = scalar @c_list;
+            if ( $params =~ /\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+);/ ) {
+                print
+"SCAN $idx: Comps=$num_c, Component_Idx_0=$comps_str, Ss=$1, Se=$2, Ah=$3, Al=$4\n";
+            }
+        }
+    }
+
+    print "=============================================\n";
+    print "[TRACE_FINAL_SCRIPT_END]\n";
+}
+
+# ----------------------------------------------------------------------------
+
 write_file $ftmp, $best;
 $data = &$tran( '-scans', "\"$ftmp\"", $arith, @strip, "\"$jtmp\"" );
 $data = appremove $data, $_ for @app;
@@ -520,6 +582,92 @@ if ( $jpegtran ne $jpegtran2 ) {
     my $data2 = &$tran2( '-scans', "\"$ftmp\"", $arith, @strip2, "\"$jtmp\"" );
     $data2 = appremove $data2, $_ for @app;
     $data  = $data2 if length $data2 && length $data2 < length $data;
+}
+
+if ($trace) {
+    print "[TRACE_BINARY_STRUCTURE_START]\n";
+    print "CONTAINER_PROPERTIES: TotalBytes=" . length($data) . "\n";
+
+    my $pos                  = 2;
+    my $size                 = length($data);
+    my $scan_counter         = 0;
+    my $current_scan_payload = 0;
+    my $inside_scan_payload  = 0;
+
+    while ( $pos < $size ) {
+        my $raw_byte = substr( $data, $pos, 1 );
+        if ( ord($raw_byte) == 0xFF ) {
+            my $next_idx = $pos + 1;
+            while ( $next_idx < $size && ord( substr( $data, $next_idx, 1 ) ) == 0xFF ) {
+                $pos++;
+                $next_idx = $pos + 1;
+            }
+            if ( $next_idx >= $size ) { last; }
+
+            my $marker = ord( substr( $data, $next_idx, 1 ) );
+            if ( $marker == 0x00 ) {
+                $current_scan_payload += 2 if $inside_scan_payload;
+                $pos                  += 2;
+                next;
+            }
+
+            if ($inside_scan_payload) {
+                print "SCAN_ENTROPY_BODY [$scan_counter]: PayloadBytes=$current_scan_payload\n";
+                $current_scan_payload = 0;
+                $inside_scan_payload  = 0;
+                $scan_counter++;
+            }
+
+            my $marker_length = 0;
+            if ( $marker != 216 && $marker != 217 && ( $marker < 208 || $marker > 215 ) ) {
+                if ( $pos + 3 < $size ) {
+                    $marker_length = unpack( 'n', substr( $data, $pos + 2, 2 ) );
+                }
+            }
+
+            if (   192 <= $marker
+                && $marker <= 207
+                && $marker != 196
+                && $marker != 200
+                && $marker != 204 )
+            {
+                my $sof_type = $marker - 192;
+                print "MARKER_NODE: Type=SOF$sof_type(0x"
+                  . sprintf( "%02X", $marker )
+                  . ") | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 196 ) {
+                print "MARKER_NODE: Type=DHT(0xC4) | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 219 ) {
+                print "MARKER_NODE: Type=DQT(0xDB) | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 221 ) {
+                print "MARKER_NODE: Type=DRI(0xDD) | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 218 ) {
+                print "MARKER_NODE: Type=SOS(0xDA) | SegmentBytes=$marker_length\n";
+                $inside_scan_payload = 1;
+                $pos += ( 2 + $marker_length );
+                next;
+            } elsif ( 224 <= $marker && $marker <= 239 ) {
+                my $app_type = $marker - 224;
+                print "MARKER_NODE: Type=APP$app_type(0x"
+                  . sprintf( "%02X", $marker )
+                  . ") | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 254 ) {
+                print "MARKER_NODE: Type=COM(0xFE) | SegmentBytes=$marker_length\n";
+            } elsif ( $marker == 217 ) {
+                print "MARKER_NODE: Type=EOI(0xD9) | SegmentBytes=0\n";
+            } else {
+                print "MARKER_NODE: Type=UNKNOWN(0x"
+                  . sprintf( "%02X", $marker )
+                  . ") | SegmentBytes=$marker_length\n";
+            }
+
+            $pos += ( $marker_length > 0 ? $marker_length + 2 : 2 );
+        } else {
+            $current_scan_payload++ if $inside_scan_payload;
+            $pos++;
+        }
+    }
+    print "[TRACE_BINARY_STRUCTURE_END]\n";
 }
 
 my $size = length $data;
